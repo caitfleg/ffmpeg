@@ -177,6 +177,8 @@ whisper() {
     in=$1 of=$2; shift 2
     # VAD keeps the model from hallucinating ("Thank you.") in long silences.
     [ -f "$VAD_MODEL" ] && set -- "$@" --vad -vm "$VAD_MODEL"
+    # Without a punctuated prompt, casual speech often comes out all lowercase with no punctuation.
+    [ "$LANG_" = en ] && set -- "$@" --prompt "Okay, so here's the thing. We'll talk it through."
     "$WHISPER" -m "$MODEL" -l "$LANG_" -f "$in" -ocsv -of "$of" -np "$@" >/dev/null 2>&1
 }
 
