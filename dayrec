@@ -24,8 +24,11 @@
 #                         on macOS set this to a virtual device such as BlackHole)
 #   DAYREC_FORMAT         ffmpeg input format      (default: auto; pulse, alsa or avfoundation)
 #   DAYREC_KEEP_DAYS      days kept by "prune"     (default 30)
-#   DAYREC_WHISPER_MODEL  whisper.cpp model file   (default ~/.cache/whisper/ggml-base.en.bin)
+#   DAYREC_WHISPER_MODEL  whisper.cpp model file   (default ~/.cache/whisper/ggml-large-v3-turbo.bin
+#                         if present, else ggml-base.en.bin)
+#   DAYREC_VAD_MODEL      Silero VAD model, skips silence (default ~/.cache/whisper/ggml-silero-v6.2.0.bin)
 #   DAYREC_LANG           transcription language   (default en)
+#   DAYREC_SPEAKERS       speakers per file, if known (default: guess; mono files only, needs uv)
 #
 # Needs only ffmpeg. 16 kHz mono 16-bit is about 115 MB per hour, 2.7 GB per day;
 # "both" is stereo, so twice that.
@@ -37,7 +40,9 @@ SOURCE=${DAYREC_SOURCE:-mic}
 RATE=${DAYREC_RATE:-16000}
 CHUNK=${DAYREC_CHUNK:-3600}
 KEEP_DAYS=${DAYREC_KEEP_DAYS:-30}
-MODEL=${DAYREC_WHISPER_MODEL:-"$HOME/.cache/whisper/ggml-base.en.bin"}
+MODEL=${DAYREC_WHISPER_MODEL:-"$HOME/.cache/whisper/ggml-large-v3-turbo.bin"}
+[ -n "${DAYREC_WHISPER_MODEL:-}" ] || [ -f "$MODEL" ] || MODEL="$HOME/.cache/whisper/ggml-base.en.bin"
+VAD_MODEL=${DAYREC_VAD_MODEL:-"$HOME/.cache/whisper/ggml-silero-v6.2.0.bin"}
 LANG_=${DAYREC_LANG:-en}
 PIDFILE="$DIR/.dayrec.pid"
 LOGFILE="$DIR/.dayrec.log"
@@ -167,8 +172,17 @@ record_loop() {
     echo "$(date '+%F %T') stopped"
 }
 
+# whisper-cli on a 16 kHz mono WAV ($1), writing CSV to $2.csv; extra flags after that.
+whisper() {
+    in=$1 of=$2; shift 2
+    # VAD keeps the model from hallucinating ("Thank you.") in long silences.
+    [ -f "$VAD_MODEL" ] && set -- "$@" --vad -vm "$VAD_MODEL"
+    "$WHISPER" -m "$MODEL" -l "$LANG_" -f "$in" -ocsv -of "$of" -np "$@" >/dev/null 2>&1
+}
+
 # Transcribe one WAV with whisper.cpp. Stereo (SOURCE=both) files are split and each
-# side transcribed on its own, then merged by time and labelled Me / Them.
+# side transcribed on its own, then merged by time and labelled Me / Them. Mono files
+# are labelled Speaker 1, Speaker 2, ... by dayrec-diarize when uv is installed.
 transcribe_file() {
     wav=$1
     txt=${wav%.wav}.txt
@@ -181,8 +195,7 @@ transcribe_file() {
             -filter_complex "[0:a]channelsplit=channel_layout=stereo[l][r]" \
             -map "[l]" "$tmp/me.wav" -map "[r]" "$tmp/them.wav" || die "split failed"
         for side in me them; do
-            "$WHISPER" -m "$MODEL" -l "$LANG_" -f "$tmp/$side.wav" -ocsv -of "$tmp/$side" -np >/dev/null 2>&1 \
-                || die "whisper-cli failed on $wav ($side)"
+            whisper "$tmp/$side.wav" "$tmp/$side" || die "whisper-cli failed on $wav ($side)"
         done
         # CSV rows are start_ms,end_ms,"text". Tag each with a speaker, sort by start.
         {
@@ -199,15 +212,23 @@ transcribe_file() {
             }' >"$txt"
     else
         ffmpeg -nostdin -v error -i "$wav" -ar 16000 -ac 1 "$tmp/a.wav" || die "resample failed"
-        "$WHISPER" -m "$MODEL" -l "$LANG_" -f "$tmp/a.wav" -ocsv -of "$tmp/a" -np >/dev/null 2>&1 \
-            || die "whisper-cli failed on $wav"
-        tail -n +2 "$tmp/a.csv" | awk -F, '{
-                ms = $1; t = $0; sub(/^[0-9]*,[0-9]*,/, "", t)
-                gsub(/^"|"$/, "", t); gsub(/""/, "\"", t); sub(/^ +/, "", t)
-                if (t == "") next
-                printf "[%02d:%02d:%02d] %s\n", ms/3600000, (ms/60000)%60, (ms/1000)%60, t
-            }' >"$txt"
+        # Short segments rarely straddle a change of speaker.
+        if [ -n "$DIARIZE" ]; then set -- -sow -ml 50; else set --; fi
+        whisper "$tmp/a.wav" "$tmp/a" "$@" || die "whisper-cli failed on $wav"
+        if [ -n "$DIARIZE" ] && uv run --quiet --script "$DIARIZE" "$tmp/a.wav" "$tmp/a.csv" >"$tmp/a.txt"; then
+            mv "$tmp/a.txt" "$txt"
+        else
+            [ -n "$DIARIZE" ] && echo "dayrec-diarize failed, writing $txt without speaker labels" >&2
+            tail -n +2 "$tmp/a.csv" | awk -F, '{
+                    ms = $1; t = $0; sub(/^[0-9]*,[0-9]*,/, "", t)
+                    gsub(/^"|"$/, "", t); gsub(/""/, "\"", t); sub(/^ +/, "", t)
+                    if (t == "") next
+                    printf "[%02d:%02d:%02d] %s\n", ms/3600000, (ms/60000)%60, (ms/1000)%60, t
+                }' >"$txt"
+        fi
     fi
+    # An empty file would count as not done and be redone on every run.
+    [ -s "$txt" ] || echo "(no speech)" >"$txt"
     rm -rf "$tmp"
     echo "wrote $txt"
 }
@@ -263,6 +284,18 @@ case $cmd in
         WHISPER=$(command -v whisper-cli || command -v whisper-cpp || true)
         [ -n "$WHISPER" ] || die "whisper-cli not found; install whisper.cpp (brew install whisper-cpp, or build from source)"
         [ -f "$MODEL" ] || die "model not found: $MODEL (download a ggml model, or set DAYREC_WHISPER_MODEL)"
+        if [ -f "$VAD_MODEL" ] && ! "$WHISPER" --help 2>&1 | grep -q -- '--vad'; then
+            echo "note: this whisper-cli has no --vad; update whisper.cpp to skip silence"
+            VAD_MODEL=
+        fi
+        # Speaker labels for mono files: dayrec-diarize next to this script or in PATH, run by uv.
+        DIARIZE=
+        if command -v uv >/dev/null 2>&1; then
+            for d in "$(dirname "$0")/dayrec-diarize" "$(command -v dayrec-diarize || true)"; do
+                [ -n "$d" ] && [ -f "$d" ] && { DIARIZE=$d; break; }
+            done
+        fi
+        [ -n "$DIARIZE" ] || echo "note: no speaker labels for mono files (needs uv and dayrec-diarize, see README)"
         target=${2:-"$DIR/$(date +%F)"}
         if [ -d "$target" ]; then
             for f in "$target"/*.wav; do
@@ -285,7 +318,7 @@ case $cmd in
             -exec rm -rf {} + -print
         ;;
     -h|--help|help)
-        sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         die "unknown command: $cmd (try: dayrec help)"

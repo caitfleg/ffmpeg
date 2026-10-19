@@ -58,9 +58,24 @@ Check your local laws before recording calls; some jurisdictions require everyon
 ```sh
 brew install whisper-cpp           # macOS; on Linux build whisper.cpp and put whisper-cli in PATH
 mkdir -p ~/.cache/whisper
-curl -L -o ~/.cache/whisper/ggml-base.en.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+curl -L -o ~/.cache/whisper/ggml-large-v3-turbo.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
+curl -L -o ~/.cache/whisper/ggml-silero-v6.2.0.bin \
+  https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin
 ```
+
+For speaker labels on mono recordings (one mic hearing everyone in the room or on the speakers), also install [uv](https://docs.astral.sh/uv/), put `dayrec-diarize` next to `dayrec`, and fetch the two diarization models:
+
+```sh
+cp dayrec-diarize ~/.local/bin/
+mkdir -p ~/.cache/dayrec
+curl -L https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2 \
+  | tar xj -C ~/.cache/dayrec
+curl -L -o ~/.cache/dayrec/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx \
+  https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx
+```
+
+The first run has `uv` fetch `sherpa-onnx` into its cache; after that everything runs offline. Tests for the speaker-merging logic: `uv run --with sherpa-onnx --with numpy python -m unittest discover tests`.
 
 Then:
 
@@ -70,7 +85,18 @@ dayrec transcribe ~/Recordings/dayrec/2026-09-24    # a whole day
 dayrec transcribe some/file.wav                     # one file
 ```
 
-Each `HH-MM-SS.wav` gets an `HH-MM-SS.txt` next to it. Files already transcribed are skipped, and so is the file still being recorded, so you can run it from cron every evening. For `both` recordings each channel is transcribed on its own and merged by time:
+Each `HH-MM-SS.wav` gets an `HH-MM-SS.txt` next to it. Files already transcribed are skipped (delete a `.txt` to redo it), and so is the file still being recorded, so you can run it from cron every evening.
+
+Mono recordings are split into speakers by voice, and runs of speech by the same person are joined into one line:
+
+```
+[00:00:00] Speaker 1: So what is the path forward here?
+[00:00:11] Speaker 2: The opportunity is for you to lead the discovery work.
+```
+
+Numbers go by who speaks first and are per file: Speaker 1 in `13-00-00.txt` need not be Speaker 1 in `14-00-00.txt`. The number of speakers is guessed, and in a big meeting one person is sometimes split into two numbers. If a 1:1 call comes out with extra speakers, pin it with `DAYREC_SPEAKERS=2 dayrec transcribe ...`. Diarization is the slow part: roughly 5 to 8 minutes per hour of audio. Without `uv` you get the same transcript without labels.
+
+For `both` recordings each channel is transcribed on its own and merged by time:
 
 ```
 [00:00:00] Me: Hi, can you hear me?
@@ -78,7 +104,7 @@ Each `HH-MM-SS.wav` gets an `HH-MM-SS.txt` next to it. Files already transcribed
 [00:00:05] Me: Yes, I said "done" by Friday.
 ```
 
-Model choice: `base.en` is fast and fine for clear calls; `small.en` or `medium.en` are more accurate and slower (set `DAYREC_WHISPER_MODEL`). An hour of audio takes a few minutes with `base.en` on a recent laptop. Silence transcribes quickly, but a tiny model will sometimes hallucinate a phrase or two in long quiet stretches.
+Model choice: `large-v3-turbo` is used when present and is much more accurate than `base.en`, which is the fallback (set `DAYREC_WHISPER_MODEL` to pick another). On an M-series Mac, an hour of audio takes about 4 minutes with turbo. With the Silero VAD model in place silence is skipped, which also stops whisper from hallucinating phrases like "Thank you." in long quiet stretches.
 
 ## Settings
 
@@ -94,8 +120,12 @@ Environment variables, all optional:
 | `DAYREC_DEVICE` | system default | see `dayrec devices` |
 | `DAYREC_FORMAT` | auto | `pulse`, `alsa`, `avfoundation` |
 | `DAYREC_KEEP_DAYS` | `30` | used by `prune` |
-| `DAYREC_WHISPER_MODEL` | `~/.cache/whisper/ggml-base.en.bin` | whisper.cpp ggml model |
+| `DAYREC_WHISPER_MODEL` | `~/.cache/whisper/ggml-large-v3-turbo.bin`, else `ggml-base.en.bin` | whisper.cpp ggml model |
+| `DAYREC_VAD_MODEL` | `~/.cache/whisper/ggml-silero-v6.2.0.bin` | skips silence; ignored if missing |
 | `DAYREC_LANG` | `en` | transcription language |
+| `DAYREC_SPEAKERS` | guess | speakers per file, for mono recordings |
+| `DAYREC_SPEAKER_THRESHOLD` | `1.0` | when guessing: higher means fewer speakers |
+| `DAYREC_DIARIZE_DIR` | `~/.cache/dayrec` | diarization models |
 
 ## Resources
 

@@ -1,0 +1,124 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["sherpa-onnx>=1.12", "numpy"]
+# ///
+# dayrec-diarize: label a whisper.cpp CSV transcript with "Speaker 1", "Speaker 2", ...
+#
+#   dayrec-diarize AUDIO.wav WHISPER.csv > transcript.txt
+#
+# AUDIO.wav must be 16 kHz mono 16-bit (dayrec transcribe makes one). Runs locally
+# with sherpa-onnx (pyannote segmentation + a speaker embedding model).
+#
+#   DAYREC_SPEAKERS            number of speakers, if known  (default: guess)
+#   DAYREC_SPEAKER_THRESHOLD   when guessing: higher = fewer speakers (default 1.0)
+#   DAYREC_DIARIZE_DIR         model folder                  (default ~/.cache/dayrec)
+import csv
+import os
+import sys
+import wave
+
+import numpy as np
+import sherpa_onnx
+
+MODELS = os.environ.get("DAYREC_DIARIZE_DIR") or os.path.expanduser("~/.cache/dayrec")
+SEGMENTATION = os.path.join(MODELS, "sherpa-onnx-pyannote-segmentation-3-0", "model.onnx")
+EMBEDDING = os.path.join(MODELS, "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx")
+# A whisper segment with no speaker turn under it gets the nearest speaker within this many seconds.
+NEAREST = 1.0
+# The default threshold is tuned on real calls: sherpa's example 0.5 split a two-person call
+# into 21 speakers; 1.0 gave 2 there and kept the people in a team meeting apart.
+# Consecutive lines from one speaker are joined unless they are this many seconds apart.
+JOIN_GAP = 3.0
+
+
+def die(msg):
+    print(f"dayrec-diarize: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def read_wav(path):
+    with wave.open(path) as w:
+        if w.getframerate() != 16000 or w.getnchannels() != 1 or w.getsampwidth() != 2:
+            die(f"{path}: need 16 kHz mono 16-bit")
+        pcm = w.readframes(w.getnframes())
+    return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768
+
+
+def diarize(samples, n, threshold):
+    """Speaker turns as (start, end, cluster). n speakers if known, else -1 to guess by threshold."""
+    for f in (SEGMENTATION, EMBEDDING):
+        if not os.path.isfile(f):
+            die(f"model not found: {f} (see README, Transcribing)")
+    threads = min(os.cpu_count() or 4, 8)
+    config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+        segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+            pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=SEGMENTATION),
+            num_threads=threads,
+        ),
+        embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=EMBEDDING, num_threads=threads),
+        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=n, threshold=threshold),
+        min_duration_on=0.3,
+        min_duration_off=0.5,
+    )
+    if not config.validate():
+        die("bad diarization config")
+    sd = sherpa_onnx.OfflineSpeakerDiarization(config)
+    return [(s.start, s.end, s.speaker) for s in sd.process(samples).sort_by_start_time()]
+
+
+def read_csv(path):
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    return [(int(r["start"]) / 1000, int(r["end"]) / 1000, r["text"].strip()) for r in rows if r["text"].strip()]
+
+
+def speaker_for(start, end, turns):
+    """The speaker talking most during [start, end], else the nearest one close by, else None."""
+    talk = {}
+    for s, e, who in turns:
+        o = min(end, e) - max(start, s)
+        if o > 0:
+            talk[who] = talk.get(who, 0) + o
+    if talk:
+        return max(talk, key=talk.get)
+    gap, who = min(((max(s - end, start - e), who) for s, e, who in turns), default=(None, None))
+    return who if gap is not None and gap <= NEAREST else None
+
+
+def stamp(t):
+    t = int(t)
+    return f"{t // 3600:02d}:{t // 60 % 60:02d}:{t % 60:02d}"
+
+
+def label(segments, turns):
+    """Transcript lines for whisper (start, end, text) segments and diarization (start, end, cluster) turns."""
+    names = {}  # cluster id -> 1, 2, ... in order of first appearance
+    lines = []  # [start, end, speaker, text]
+    for start, end, text in segments:
+        who = speaker_for(start, end, turns)
+        # Speech the diarizer missed (a quick "yes", a quiet voice) is kept, just unlabelled.
+        who = "?" if who is None else names.setdefault(who, len(names) + 1)
+        if lines and lines[-1][2] == who and start - lines[-1][1] < JOIN_GAP:
+            lines[-1][1] = end
+            lines[-1][3] += " " + text
+        else:
+            lines.append([start, end, who, text])
+    return [f"[{stamp(start)}] Speaker {who}: {text}" for start, _, who, text in lines]
+
+
+def main():
+    if len(sys.argv) != 3:
+        die("usage: dayrec-diarize AUDIO.wav WHISPER.csv")
+    try:
+        n = int(os.environ.get("DAYREC_SPEAKERS") or -1)
+        threshold = float(os.environ.get("DAYREC_SPEAKER_THRESHOLD") or 1.0)
+    except ValueError:
+        die("DAYREC_SPEAKERS must be a whole number and DAYREC_SPEAKER_THRESHOLD a number")
+    turns = diarize(read_wav(sys.argv[1]), n, threshold)
+    for line in label(read_csv(sys.argv[2]), turns):
+        print(line)
+
+
+if __name__ == "__main__":
+    main()
