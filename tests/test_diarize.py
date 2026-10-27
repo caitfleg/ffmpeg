@@ -51,5 +51,23 @@ class Label(unittest.TestCase):
         self.assertEqual(dd.stamp(3725.9), "01:02:05")
 
 
+FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "two-voices.wav")
+
+
+@unittest.skipUnless(os.path.isfile(dd.SEGMENTATION) and os.path.isfile(dd.EMBEDDING), "diarization models not downloaded")
+class Diarize(unittest.TestCase):
+    """Guards the default threshold: two synthetic voices taking six turns must come out as two speakers."""
+
+    def test_two_voices_found_by_guessing(self):
+        turns = dd.diarize(dd.read_wav(FIXTURE), -1, dd.DEFAULT_THRESHOLD)
+        self.assertEqual(len({who for _, _, who in turns}), 2)
+
+    def test_turns_alternate(self):
+        turns = dd.diarize(dd.read_wav(FIXTURE), -1, dd.DEFAULT_THRESHOLD)
+        order = [who for _, _, who in turns]
+        changes = [who for i, who in enumerate(order) if i == 0 or who != order[i - 1]]
+        self.assertEqual(len(changes), 6)
+
+
 if __name__ == "__main__":
     unittest.main()

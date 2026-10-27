@@ -75,7 +75,7 @@ curl -L -o ~/.cache/dayrec/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx \
   https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx
 ```
 
-The first run has `uv` fetch `sherpa-onnx` into its cache; after that everything runs offline. Tests for the speaker-merging logic: `uv run --with sherpa-onnx --with numpy python -m unittest discover tests`.
+The first run has `uv` fetch `sherpa-onnx` into its cache; after that everything runs offline.
 
 Then:
 
@@ -94,7 +94,7 @@ Mono recordings are split into speakers by voice, and runs of speech by the same
 [00:00:11] Speaker 2: The opportunity is for you to lead the discovery work.
 ```
 
-Numbers go by who speaks first and are per file: Speaker 1 in `13-00-00.txt` need not be Speaker 1 in `14-00-00.txt`. The number of speakers is guessed, and in a big meeting one person is sometimes split into two numbers. If a 1:1 call comes out with extra speakers, pin it with `DAYREC_SPEAKERS=2 dayrec transcribe ...`. Diarization is the slow part: roughly 5 to 8 minutes per hour of audio. Without `uv` you get the same transcript without labels.
+Numbers go by who speaks first and are per file: Speaker 1 in `13-00-00.txt` need not be Speaker 1 in `14-00-00.txt`. The number of speakers is guessed, and in a big meeting one person is sometimes split into two numbers (the default leans that way, since merging two people into one is harder to spot). If a 1:1 call comes out with extra speakers, pin it with `DAYREC_SPEAKERS=2 dayrec transcribe ...`. Diarization is the slow part: roughly 5 to 8 minutes per hour of audio. Without `uv` you get the same transcript without labels.
 
 For `both` recordings each channel is transcribed on its own and merged by time:
 
@@ -124,7 +124,7 @@ Environment variables, all optional:
 | `DAYREC_VAD_MODEL` | `~/.cache/whisper/ggml-silero-v6.2.0.bin` | skips silence; ignored if missing |
 | `DAYREC_LANG` | `en` | transcription language |
 | `DAYREC_SPEAKERS` | guess | speakers per file, for mono recordings |
-| `DAYREC_SPEAKER_THRESHOLD` | `1.0` | when guessing: higher means fewer speakers |
+| `DAYREC_SPEAKER_THRESHOLD` | `0.9` | when guessing: higher means fewer speakers |
 | `DAYREC_DIARIZE_DIR` | `~/.cache/dayrec` | diarization models |
 
 ## Resources
@@ -134,3 +134,13 @@ It's one `ffmpeg` process writing raw PCM (no encoding), run at `nice 10`. CPU u
 `prune` doesn't run on its own. To keep the disk from filling up, schedule it, e.g. `0 3 * * * $HOME/.local/bin/dayrec prune` in `crontab -e`.
 
 If the mic disappears (unplugged, busy), dayrec logs it to `$DAYREC_DIR/.dayrec.log` and retries every 10 seconds.
+
+## Developing
+
+`./check` runs everything CI runs: `sh -n`, `shellcheck`, and the tests (needs `shellcheck`, `ffmpeg` and `uv`). The speaker-count test is skipped until the diarization models are downloaded. To run it before every commit:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+`tests/fixtures/two-voices.wav` is two macOS voices taking turns; `tests/fixtures/make-two-voices.sh` rebuilds it.
