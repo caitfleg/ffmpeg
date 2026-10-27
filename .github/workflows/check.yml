@@ -1,0 +1,23 @@
+name: check
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg shellcheck
+      # Without the models the speaker-count test skips, and it is the one that guards the threshold.
+      - uses: actions/cache@v5
+        id: models
+        with:
+          path: ~/.cache/dayrec
+          key: dayrec-models-v1
+      - if: steps.models.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/dayrec
+          curl -fsSL https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2 \
+            | tar xj -C ~/.cache/dayrec
+          curl -fsSL -o ~/.cache/dayrec/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx
+      - run: ./check

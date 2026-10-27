@@ -89,6 +89,13 @@ is_running() {
     [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
 }
 
+# Today's newest WAV, the one being written while recording (empty if none).
+latest_wav() {
+    last=
+    for f in "$DIR/$(date +%F)"/*.wav; do [ -f "$f" ] && last=$f; done
+    echo "$last"
+}
+
 # The date $1 seconds from now (GNU/busybox date -d @N, BSD/macOS date -r N).
 date_in() {
     t=$(($(date +%s) + $1))
@@ -199,7 +206,7 @@ transcribe_file() {
         for side in me them; do
             whisper "$tmp/$side.wav" "$tmp/$side" || die "whisper-cli failed on $wav ($side)"
         done
-        # CSV rows are start_ms,end_ms,"text". Tag each with a speaker, sort by start.
+        # CSV rows are start_ms,end_ms,"text", standard CSV (quotes doubled). Tag each with a speaker, sort by start.
         {
             awk 'NR > 1 { print "Me\t" $0 }' "$tmp/me.csv"
             awk 'NR > 1 { print "Them\t" $0 }' "$tmp/them.csv"
@@ -221,6 +228,7 @@ transcribe_file() {
             mv "$tmp/a.txt" "$txt"
         else
             [ -n "$DIARIZE" ] && echo "dayrec-diarize failed, writing $txt without speaker labels" >&2
+            # Standard CSV, as above: quotes in the text are doubled.
             tail -n +2 "$tmp/a.csv" | awk -F, '{
                     ms = $1; t = $0; sub(/^[0-9]*,[0-9]*,/, "", t)
                     gsub(/^"|"$/, "", t); gsub(/""/, "\"", t); sub(/^ +/, "", t)
@@ -260,8 +268,8 @@ case $cmd in
     status)
         if is_running; then
             echo "recording (pid $(cat "$PIDFILE")) to $DIR"
-            latest=$(ls -1 "$DIR/$(date +%F)" 2>/dev/null | grep '\.wav$' | tail -n 1)
-            [ -n "$latest" ] && echo "current file: $DIR/$(date +%F)/$latest"
+            latest=$(latest_wav)
+            [ -n "$latest" ] && echo "current file: $latest"
         else
             echo "not recording"
         fi
@@ -303,7 +311,7 @@ case $cmd in
             for f in "$target"/*.wav; do
                 [ -f "$f" ] || { echo "no WAV files in $target"; break; }
                 # Skip the file currently being written.
-                if is_running && [ "$f" = "$DIR/$(date +%F)/$(ls -1 "$DIR/$(date +%F)" | grep '\.wav$' | tail -n 1)" ]; then
+                if is_running && [ "$f" = "$(latest_wav)" ]; then
                     echo "skip (still recording): $f"; continue
                 fi
                 transcribe_file "$f"
@@ -320,7 +328,7 @@ case $cmd in
             -exec rm -rf {} + -print
         ;;
     -h|--help|help)
-        sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)
         die "unknown command: $cmd (try: dayrec help)"

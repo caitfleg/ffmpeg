@@ -1,0 +1,7 @@
+#!/bin/sh
+# Everything that must pass before a commit: run by .githooks/pre-commit and CI.
+set -eu
+cd "$(dirname "$0")"
+sh -n dayrec
+shellcheck -s sh dayrec check .githooks/pre-commit tests/fixtures/make-two-voices.sh
+uv run --quiet --with sherpa-onnx --with numpy python -m unittest discover tests
